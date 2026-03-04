@@ -1,0 +1,5 @@
+Title: Demo Document
+This document demonstrates adding images and text.
+[Image: image.png]
+[Image: image2.png]
+[Image: image1.png]
