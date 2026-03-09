@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict, is_dataclass
 import logging
-from typing import TypeVar, Generic, Any
+from typing import TypeVar, Generic, Any, Dict, List, Optional
 
 logging.basicConfig(
     filename="app.log",
@@ -78,7 +78,7 @@ class INotificationDecorator(INotification[DataT], Generic[DataT]):
         self.headers = headers or {"key": "value"}
 
 
-class NotificationWithHeaders(INotificationDecorator):
+class NotificationWithHeaders(INotificationDecorator[DataT], Generic[DataT]):
     def set_headers(self, headers: dict[str, str]):
         self.headers = headers
 
@@ -101,8 +101,9 @@ class NotificationWithHeaders(INotificationDecorator):
             self.notification.data = original
 
 
-class IPersistence:
-    def persist(self, notification: INotification): ...
+class IPersistence(ABC):
+    @abstractmethod
+    def persist(self, notification: INotification[Any]) -> None: ...
 
 
 class LogsStorage(IPersistence):
@@ -115,26 +116,79 @@ class LogsStorage(IPersistence):
         )
 
 
+class InMemoryStorage(IPersistence):
+    """Simple in-memory persistence for testing / interview demos."""
+
+    def __init__(self) -> None:
+        self.saved: List[Dict[str, Any]] = []
+
+    def persist(self, notification: INotification[Any]) -> None:
+        payload = notification.data
+        if is_dataclass(payload):
+            payload = asdict(payload)
+        entry: Dict[str, Any] = {
+            "channel": notification.__class__.__name__,
+            "data": payload,
+        }
+        self.saved.append(entry)
+        logging.info(f"Notification saved in memory {entry}")
+
+
+@dataclass
+class RetryPolicy:
+    retries: int = 0
+    backoff_seconds: float = 0.0
+
+
 class NotificationService:
-    def __init__(self, user: User, persistence: IPersistence) -> None:
+    def __init__(
+        self,
+        user: User,
+        persistence: IPersistence,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
         self.notifications = []
         self.user = user
         self.persistence = persistence
+        self.retry_policy = retry_policy or RetryPolicy()
 
-    def add_notification(self, notification):
+    def add_notification(self, notification: INotification[Any]) -> None:
         self.notifications.append(notification)
 
-    def notify(self):
-        for notification in self.notifications:
-            notification.notify(self.user)
-            self.persistence.persist(notification)
+    def notify(self) -> None:
+        for notification in self.notifications:  # type: INotification[Any]
+            attempt = 0
+            while True:
+                try:
+                    notification.notify(self.user)
+                    self.persistence.persist(notification)
+                    break
+                except Exception as exc:
+                    attempt += 1
+                    logging.exception(
+                        f"Notification failed for {notification.__class__.__name__} attempt={attempt}"
+                    )
+                    if attempt > self.retry_policy.retries:
+                        logging.error(
+                            f"Dropping notification after {attempt} attempts: {notification}"
+                        )
+                        break
+                    if self.retry_policy.backoff_seconds:
+                        import time
+
+                        time.sleep(self.retry_policy.backoff_seconds)
 
 
 if __name__ == "__main__":
     user = User(id=1, name="Saksham Gupta", email="saksham.gupta@orange.com")
-    persistence = LogsStorage()
+    # use InMemoryStorage for demo / interview testing
+    persistence = InMemoryStorage()
+    # simple retry policy: 1 retry with small backoff
+    retry_policy = RetryPolicy(retries=1, backoff_seconds=0.1)
 
-    notification_service = NotificationService(user=user, persistence=persistence)
+    notification_service = NotificationService(
+        user=user, persistence=persistence, retry_policy=retry_policy
+    )
 
     sms = SMSNotification(
         SMSData(phone="+1234567890", message="Hi", content="Hello There")
@@ -158,3 +212,6 @@ if __name__ == "__main__":
     notification_service.add_notification(popup)
 
     notification_service.notify()
+
+    # show in-memory storage contents for verification
+    print("Persisted entries:", persistence.saved)
